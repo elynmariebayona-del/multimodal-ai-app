@@ -57,7 +57,7 @@ if mode == "💬 Chat with LLM":
         with st.spinner("Thinking..."):
             try:
                 response = openrouter_client.chat.completions.create(
-                    model="baidu/cobuddy:free",
+                    model="openai/gpt-oss-120b:free",
                     messages=api_messages,
                     extra_body={"reasoning": {"enabled": True}}
                 )
