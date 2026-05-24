@@ -1,102 +1,115 @@
+import io
+import base64
+import requests
 import streamlit as st
 from openai import OpenAI
-from huggingface_hub import InferenceClient
 
-# --- PAGE CONFIGURATION ---
-st.set_page_config(page_title="Multi-Modal AI App", page_icon="🤖", layout="wide")
+# ── Clients ───────────────────────────────────────────────────────────────────
 
-# --- SECURE API KEY HANDLING ---
-OPENROUTER_API_KEY = st.secrets.get("OPENROUTER_API_KEY")
-HF_TOKEN = st.secrets.get("HF_TOKEN")
-
-if not OPENROUTER_API_KEY or not HF_TOKEN:
-    st.error("⚠️ API Keys missing! Please add OPENROUTER_API_KEY and HF_TOKEN to your `.streamlit/secrets.toml` file.")
-    st.stop()
-
-# Initialize the OpenRouter client for Chat
 openrouter_client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
-    api_key=OPENROUTER_API_KEY,
+    api_key=st.secrets["OPENROUTER_API_KEY"],
 )
 
-# Initialize the Hugging Face client for Image Generation
-hf_client = InferenceClient(token=HF_TOKEN)
+HUGGINGFACE_API_KEY = st.secrets["HUGGINGFACE_API_KEY"]
+HF_IMAGE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
+HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_IMAGE_MODEL}"
+TEXT_MODEL = "openai/gpt-oss-120b:free"
 
-# --- UI HEADER ---
-st.title("🤖 NLP: Multi-Modal AI App")
-st.caption("Artificial Intelligence 10.0 - Chat & Image Generator")
 
-# --- SIDEBAR MODE SELECTION ---
-mode = st.sidebar.radio("Choose Mode:", ["💬 Chat with LLM", "🎨 Image Generator"])
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
-# ==========================================
-# MODE 1: CHAT (OpenRouter - baidu/cobuddy:free)
-# ==========================================
-if mode == "💬 Chat with LLM":
-    st.header("Chat with the Large Language Model")
-    
-    # Initialize chat history
-    if "chat_messages" not in st.session_state:
-        st.session_state.chat_messages = []
+def chat_with_reasoning(messages: list) -> tuple[str, list]:
+    """Send messages with reasoning enabled. Returns (reply_text, updated_messages)."""
+    resp = openrouter_client.chat.completions.create(
+        model=TEXT_MODEL,
+        messages=messages,
+        extra_body={"reasoning": {"enabled": True}},
+    )
+    assistant_msg = resp.choices[0].message
 
-    # Display chat messages from history
-    for message in st.session_state.chat_messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+    updated = messages + [
+        {
+            "role": "assistant",
+            "content": assistant_msg.content,
+            "reasoning_details": assistant_msg.reasoning_details,
+        }
+    ]
+    return assistant_msg.content, updated
 
-    # React to user input
-    if prompt := st.chat_input("What is on your mind?"):
-        # Display user message
-        st.chat_message("user").markdown(prompt)
-        st.session_state.chat_messages.append({"role": "user", "content": prompt})
 
-        # Prepare messages for the API
-        api_messages = [{"role": m["role"], "content": m["content"]} for m in st.session_state.chat_messages]
+def generate_image(prompt: str) -> bytes:
+    """Generate an image via Hugging Face and return raw bytes."""
+    headers = {"Authorization": f"Bearer {HUGGINGFACE_API_KEY}"}
+    response = requests.post(
+        HF_API_URL,
+        headers=headers,
+        json={"inputs": prompt},
+        timeout=120,
+    )
+    response.raise_for_status()
+    return response.content
 
-        # Get LLM response
-        with st.spinner("Thinking..."):
-            try:
-                response = openrouter_client.chat.completions.create(
-                    model="openai/gpt-oss-120b:free",
-                    messages=api_messages,
-                    extra_body={"reasoning": {"enabled": True}}
-                )
-                assistant_reply = response.choices[0].message.content
-            except Exception as e:
-                assistant_reply = f"Sorry, an error occurred: {e}"
 
-        # Display assistant response
+# ── Streamlit UI ──────────────────────────────────────────────────────────────
+
+st.set_page_config(page_title="AI Assistant", page_icon="🤖", layout="centered")
+st.title("🤖 AI Assistant")
+
+tab_chat, tab_image = st.tabs(["💬 Chat", "🎨 Image Generation"])
+
+
+# ── Tab 1: Chat ───────────────────────────────────────────────────────────────
+
+with tab_chat:
+    st.subheader("Chat with Reasoning")
+
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    # Render chat history (skip reasoning_details in display)
+    for msg in st.session_state.messages:
+        if msg["role"] in ("user", "assistant"):
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+
+    if prompt := st.chat_input("Ask something..."):
+        # Show user message
+        with st.chat_message("user"):
+            st.markdown(prompt)
+
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
         with st.chat_message("assistant"):
-            st.markdown(assistant_reply)
-        
-        # Add to history
-        st.session_state.chat_messages.append({"role": "assistant", "content": assistant_reply})
+            with st.spinner("Thinking..."):
+                reply, updated_messages = chat_with_reasoning(st.session_state.messages)
+            st.markdown(reply)
+
+        st.session_state.messages = updated_messages
+
+    if st.button("🗑️ Clear chat"):
+        st.session_state.messages = []
+        st.rerun()
 
 
-# ==========================================
-# MODE 2: IMAGE GENERATION (Hugging Face)
-# ==========================================
-elif mode == "🎨 Image Generator":
-    st.header("Generate Images from Text")
-    st.info("Using `stabilityai/stable-diffusion-xl-base-1.0` via Hugging Face Free Inference API.")
-    
-    img_prompt = st.text_input("Describe the image you want to generate:", key="image_prompt")
-    
-    if st.button("Generate Image", type="primary"):
-        if img_prompt:
-            with st.spinner("Creating your image... (May take 10-30 seconds if the model is waking up)"):
-                try:
-                    # Call Hugging Face text_to_image API
-                    image = hf_client.text_to_image(
-                        prompt=img_prompt, 
-                        model="stabilityai/stable-diffusion-xl-base-1.0"
-                    )
-                    
-                    # Display the PIL Image object directly in Streamlit
-                    st.image(image, caption=img_prompt, use_column_width=True)
-                    
-                except Exception as e:
-                    st.error(f"An error occurred while generating the image: {e}")
-                    st.warning("💡 *Tip: Hugging Face free tier models sometimes need to 'warm up'. Try clicking Generate again in 30 seconds.*")
-        else:
-            st.warning("Please enter a prompt first!")
+# ── Tab 2: Image Generation ───────────────────────────────────────────────────
+
+with tab_image:
+    st.subheader("Image Generation")
+
+    img_prompt = st.text_area("Describe the image you want", height=100)
+
+    if st.button("✨ Generate Image", disabled=not img_prompt.strip()):
+        with st.spinner("Generating image..."):
+            try:
+                img_bytes = generate_image(img_prompt)
+                st.image(img_bytes, caption=img_prompt, use_column_width=True)
+
+                st.download_button(
+                    label="⬇️ Download Image",
+                    data=img_bytes,
+                    file_name="generated.png",
+                    mime="image/png",
+                )
+            except requests.HTTPError as e:
+                st.error(f"Image generation failed: {e}")
