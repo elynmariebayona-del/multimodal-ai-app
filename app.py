@@ -1,40 +1,47 @@
-
 import requests
 import streamlit as st
 from openai import OpenAI
 
-# ── Clients ───────────────────────────────────────────────────────────────────
+# ── Config ────────────────────────────────────────────────────────────────────
 
-@st.cache_resource
+TEXT_MODEL = "mistralai/mistral-7b-instruct:free"
+
+HF_IMAGE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
+HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_IMAGE_MODEL}"
+
+APP_URL = "https://zmttk63suq.streamlit.app"
+
+
+# ── Client ────────────────────────────────────────────────────────────────────
+
 def get_openrouter_client():
     return OpenAI(
         base_url="https://openrouter.ai/api/v1",
         api_key=st.secrets["OPENROUTER_API_KEY"],
     )
 
-TEXT_MODEL = "openai/gpt-oss-120b:free"
-
-# Hugging Face - using the correct inference endpoint format
-HF_IMAGE_MODEL = "stabilityai/stable-diffusion-xl-base-1.0"
-HF_API_URL = f"https://api-inference.huggingface.co/models/{HF_IMAGE_MODEL}"
-
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def chat_with_reasoning(messages: list) -> tuple:
-    client = get_openrouter_client()
     try:
-        resp = client.chat.completions.create(
+        clean_messages = [
+            {"role": m["role"], "content": m["content"]}
+            for m in messages
+        ]
+        resp = get_openrouter_client().chat.completions.create(
             model=TEXT_MODEL,
-            messages=messages,
-            extra_body={"reasoning": {"enabled": True}},
+            messages=clean_messages,
+            extra_headers={
+                "HTTP-Referer": APP_URL,
+                "X-Title": "AI Assistant",
+            },
         )
         assistant_msg = resp.choices[0].message
         updated = messages + [
             {
                 "role": "assistant",
                 "content": assistant_msg.content,
-                "reasoning_details": getattr(assistant_msg, "reasoning_details", None),
             }
         ]
         return assistant_msg.content, updated
@@ -61,29 +68,24 @@ def generate_image(prompt: str) -> bytes | None:
             json={"inputs": prompt},
             timeout=120,
         )
-        # Model may still be loading
         if response.status_code == 503:
-            st.warning("Model is loading on Hugging Face, please wait ~20s and try again.")
+            st.warning("Model is loading on Hugging Face (~20s), please try again.")
             return None
         response.raise_for_status()
         return response.content
 
-    except requests.exceptions.ConnectionError:
-        st.error(
-            "Cannot reach Hugging Face API. "
-            "Make sure your Streamlit Cloud app has outbound internet access "
-            "and the HF endpoint URL is correct."
-        )
+    except requests.exceptions.ConnectionError as e:
+        st.error(f"Cannot reach Hugging Face API: {e}")
         return None
     except requests.exceptions.Timeout:
-        st.error("Request timed out. The model may be cold-starting — try again.")
+        st.error("Request timed out. Try again.")
         return None
     except requests.HTTPError as e:
-        st.error(f"Hugging Face API error: {e}")
+        st.error(f"Hugging Face API error {response.status_code}: {e}")
         return None
 
 
-# ── Streamlit UI ──────────────────────────────────────────────────────────────
+# ── UI ────────────────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="AI Assistant", page_icon="🤖", layout="centered")
 st.title("🤖 AI Assistant")
@@ -107,7 +109,6 @@ with tab_chat:
     if prompt := st.chat_input("Ask something..."):
         with st.chat_message("user"):
             st.markdown(prompt)
-
         st.session_state.messages.append({"role": "user", "content": prompt})
 
         with st.chat_message("assistant"):
